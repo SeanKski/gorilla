@@ -3,18 +3,33 @@ import json
 import os
 import requests
 import time
+from typing import Optional
+from abc import ABC, abstractmethod
 
 from aiohttp import web
 
 import openai
+from openai.types.chat import ChatCompletion
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
-class OpenAIProxyServer:
-
-    def __init__(self, base_url=None, api_key=None, client=None,
-                 required_request_parameters=['messages', 'model']
-                 ):
+class BaseOpenAIProxyServer(ABC):
+    """
+    A proxy server that can be used to wrap around an OpenAI chat API client. This is helpful for quickly writing a 
+    custom inference server (e.g., for tool-use).
+    """    
+    def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None,
+                 client: Optional[openai.AsyncOpenAI] = None,
+                 required_request_parameters: Optional[list] = ['messages', 'model']):
+        """
+        Initializes the ProxyServer object.
+        Parameters:
+        - base_url: The base URL of the server. Default is None, if this is not provided then client must be provided.
+        - api_key: The API key for authentication. Default is None, if this is not provided then client must be provided.
+        - client: An instance of the AsyncOpenAI client. Default is None, if this is not provided then base_url and api_key must be provided.
+        - required_request_parameters (list): A list of keys which are required for a request to be considered valid.
+            The default is ['messages', 'model'].
+        """ 
         # either client or base_url and api_key should be provided
         if client is None:
             if base_url is None or api_key is None:
@@ -31,13 +46,100 @@ class OpenAIProxyServer:
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
         self.logger = logging.getLogger(__name__)
 
+    async def _handle_request(self, request: web.Request):
+        """
+        The main handler for incoming requests. This method extracts the request data, processes it, and returns the response.
+        Ideally this shouldn't be overridden, and instead you should override the components of this pipeline. 
+        The components are:
+          1. `preprocess_request_data`: This takes in the raw request dictionary and allows for custom preprocessing
+          2.  `execute_request`: This takes in the preprocessed request dictionary and does the actual inference execution
+          3. `post_process_request_execution`: This takes in the executed response and allows for custom post-processing
+          4. `format_chat_completion_response`: This takes in the post-processed dictionary and formats to the form expected
+                by the OpenAI chat completion API. This probably doesn't need to be overridden, but put here just in case.
+        """
+        self.logger.info(f"Received request from {request.remote}")
+        try:
+            request_data = await request.json()
+            self.validate_request(request_data)            
+            request_data = await self.preprocess_request_data(request_data)
+            executed_response_data = await self.execute_request(request_data)
+            executed_response_data = await self.post_process_request_execution(executed_response_data)
+            formatted_json_response = self.format_chat_completion_response(executed_response_data)
+            return web.json_response(formatted_json_response)
+        except Exception as e:
+            # at some point we might want to pass the relevant data_dict here for better error handling
+            # but for now, we'll just pass None
+            return self._request_exception_handler(error=e, data_dict=None)
+
+    async def preprocess_request_data(self, request_data: dict) -> dict:
+        """
+        A method for preprocessing the request data before sending it to the `execute_request` method.
+        This can be subclassed to modify the input request data (e.g., adding tools, modifying system messages, etc.).
+        """
+        return request_data
+    
+    async def execute_request(self, request_data: dict) -> ChatCompletion | dict:
+        """
+        A method which takes in the pre-processed request dictionary and does the actual inference execution.
+        This can be subclassed to modify the actual execution (e.g., implementing conditional generation, etc.).
+        """
+        self.logger.info(f"Sending request to OpenAI with data: {json.dumps(request_data, indent=2)}")
+        response = await self.client.chat.completions.create(**request_data)
+        return response
+    
+    async def post_process_request_execution(self, response: dict | ChatCompletion) -> dict | ChatCompletion:
+        """
+        A method for post-processing the response from the OpenAI client before returning it to the user.
+        This can be subclassed to modify the output response (e.g., adding metadata, unifying messages, etc.).
+        """
+        return response
+
+    def format_chat_completion_response(self, response: dict | ChatCompletion) -> dict:
+        """
+        A method for formatting the response from the OpenAI client into the form expected by the OpenAI chat completion API.
+        NOTE: By default this only works for OpenAI ChatCompletion objects. If you are passing in a dictionary,
+              you will need to override this method.
+        """
+        if isinstance(response, ChatCompletion):
+            # Response is a subclass of the Pydantic BaseModel, so all we need to do is call model_dump() to convert it to JSON
+           return response.model_dump()
+        
+            # # Leaving this old code here for reference in case someone wants to implement a custom formatting
+            # # extract any tools calls from the response
+            # if hasattr(response.choices[0].message, 'tool_calls'):
+            #     tool_calls = [tool_call.model_dump() for tool_call in response.choices[0].message.tool_calls]
+            # formatted_response = {
+            #     "id": response.id,
+            #     "object": "chat.completion",
+            #     "created": response.created,
+            #     "model": response.model,
+            #     "choices": [{
+            #         "index": 0,
+            #         "message": {
+            #             "role": "assistant",
+            #             "content": response.choices[0].message.content,
+            #             "tool_calls": tool_calls
+            #         },
+            #         "finish_reason": response.choices[0].finish_reason
+            #     }],
+            #     "usage": {
+            #         "prompt_tokens": response.usage.prompt_tokens,
+            #         "completion_tokens": response.usage.completion_tokens,
+            #         "total_tokens": response.usage.total_tokens,
+            #     }
+            # }
+        else:
+            raise ValueError('The default `format_chat_completion_response` method only works for OpenAI ChatCompletion objects.'
+                       'If you are returning a dictionary, you will need to override this method.')
+        return formatted_response
+
     def create_app(self):
         app = web.Application()
         app.on_startup.append(self._on_startup)
-        self.setup_routes(app)
+        self._setup_routes(app)
         return app
     
-    def setup_routes(self, app):
+    def _setup_routes(self, app):
         # app.router.add_post('/', self._handle_request)
         app.router.add_post('/chat/completions', self._handle_request)
         app.router.add_get('/', self._health_check)
@@ -47,98 +149,6 @@ class OpenAIProxyServer:
 
     async def _health_check(self, request: web.Request):
         return web.json_response({"status": "healthy"})
-    
-    async def _handle_request(self, request: web.Request):
-        self.logger.info(f"Received request from {request.remote}")
-        try:
-            request_data = await self.extract_request_data(request)
-            return await self.process_request(request_data)
-        except Exception as e:
-            return self._request_exception_handler(error=e)
-
-    async def extract_request_data(self, request: web.Request):
-        try:
-            request_data = await request.json()
-            self.validate_request(request_data)
-        except Exception as e:
-            self.logger.error(f"Error in extract_request_data: {str(e)}")
-
-        # # TOOL USE SPECIFIC STUFF
-        # request_data['tools'] = request_data.get('tools', [])
-        # if request_data['tools']:
-        #     request_data['tool_choice'] = request_data.get('tool_choice', 'auto')
-        # else:
-        #     request_data['tool_choice'] = None
-        # request_data['stop'] = request_data.get('stop', ["</tool_call>"])
-        # try:
-        #     request_data['messages'] = create_or_modify_system_prompt(request_data['messages'], request_data['tools'], request_data['tool_choice'])
-        # except Exception as e:
-        #     self.logger.error(f"Error in create_or_modify_system_prompt: {str(e)}", exc_info=True)
-        #     raise
-
-        return request_data
-    
-    async def process_request(self, request_data: dict):
-        self.logger.info(f"Sending request to OpenAI with data: {json.dumps(request_data, indent=2)}")
-        response = await self.client.chat.completions.create(**request_data)
-        
-        formatted_response = {
-            "id": response.id,
-            "object": "chat.completion",
-            "created": response.created,
-            "model": request_data['model'],
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": response.choices[0].message.content,
-                    "tool_calls": response.choices[0].message.tool_calls if hasattr(response.choices[0].message, 'tool_calls') else None
-                },
-                "finish_reason": response.choices[0].finish_reason
-            }],
-            "usage": {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            }
-        }
-        self.logger.info(f"Received response from OpenAI: {json.dumps(formatted_response, indent=2)}")
-        return web.json_response(formatted_response)
-
-
-    async def process_request(self, request_data: dict):
-        response = await self.client.chat.completions.create(
-            **request_data
-        )
-        
-        # Simulate the 'usage' data (this should ideally come from real usage metrics)
-        usage = {
-            "prompt_tokens": response.usage.prompt_tokens,
-            "completion_tokens": response.usage.completion_tokens,
-            "total_tokens": response.usage.total_tokens,
-        }
-
-        message = {
-            "role": "assistant",
-            "content": response.choices[0].message.content,
-            "tool_calls": None
-        }
-
-        # Construct a response matching the OpenAI API structure
-        formatted_response = {
-            "id": response.id,
-            "object": "chat.completion",
-            "created": response.created,
-            "model": request_data['model'],
-            "choices": [{
-                "index":0,
-                "message": message,
-                "logprobs": None,
-                "finish_reason": response.choices[0].finish_reason
-            }],
-            "usage": usage
-        }
-        return web.json_response(formatted_response)
     
     def _request_exception_handler(self, error: Exception, data_dict=None):
         self.logger.error(f"Error encountered in request: {str(error)}", exc_info=True)
@@ -177,42 +187,19 @@ class OpenAIProxyServer:
         )
     
     def _output_bad_request_error(self, error: Exception, data_dict: dict = None):
-
         assert isinstance(error, openai.BadRequestError), f"Error must be a BadRequestError. Got {type(error)} instead."
         # # okay, we have a bad request error, let's build a response
+        # for now we'll just return the error as is, but this can be customized (e.g., adding more info)
         return self._output_openai_error(error, data_dict)
-        
-        # # TODO: this implement this properly
-        # print('warning: a bad request has been made, but the handler is not implemented yet so generic response inbound.')
-        # return web.json_response(
-        #     {
-        #         "id": 0,
-        #         "object": "chat.completion",
-        #         "created": 0,
-        #         "model": "XXX",
-        #         "choices": [{
-        #             "index":0,
-        #             "message": {
-        #                 "role": "assistant",
-        #                 "content": None,
-        #                 "tool_calls": []
-        #             },
-        #             "logprobs": None,
-        #             "finish_reason": "ERROR"
-        #         }],
-        #         "usage": {
-        #         "prompt_tokens": 100,
-        #         "completion_tokens": 0,
-        #         "total_tokens": 100,
-        #         }
-        #     },
-        #     status=400
-        # )
 
     def validate_request(self, request_data):
+        """
+        Validates the incoming request data to ensure it contains the required parameters.
+        """
         for key in self.required_request_parameters:
             if key not in request_data:
-                raise ValueError(f"Request must contain a '{key}' key.")
+                logging.error(f"Incoming request data failed to validate due to missing a required parameter. It must contain a '{key}' key.")
+                raise ValueError(f"Incoming request data is missing the required '{key}' key.")
 
 
 def check_if_server_is_running(url='http://localhost:8080', retries=5, delay=2):
@@ -239,10 +226,9 @@ if __name__ == '__main__':
     base_url = os.getenv("DATABRICKS_URL")
     if base_url is None:
         print("DATABRICKS_URL not set, using default (DF 1 workspace url)")
-        base_url = "https://dbc-559ffd80-2bfc.cloud.databricks.com/serving-endpoints/"
+        base_url = 'N/A'
     api_key = os.environ["DATABRICKS_TOKEN"]
-    # api_key = os.getenv("OPENAI_API_KEY")
     
-    proxy_server = OpenAIProxyServer(base_url=base_url, api_key=api_key)
+    proxy_server = BaseOpenAIProxyServer(base_url=base_url, api_key=api_key)
     app = proxy_server.create_app()
     web.run_app(app, port=8080)
