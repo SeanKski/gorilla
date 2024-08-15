@@ -19,6 +19,7 @@ from model_handler.arctic_handler import ArcticHandler
 from model_handler.generic_vllm_handler import GenericVLLMHandler
 from model_handler.generic_oai_compatible_model_handler import GenericOAICompatibleModelHandler
 from model_handler.dummy_handler import DummyModelHandler
+from model_handler.generic_oai_proxy_handler import GenericOAIProxyHandler
 
 handler_map = {
     "gorilla-openfunctions-v0": GorillaHandler,
@@ -79,6 +80,8 @@ handler_map = {
     "generic-vllm-model-FC": GenericVLLMHandler,
     "generic-oai-compatible-model": GenericOAICompatibleModelHandler,
     "generic-oai-compatible-model-FC": GenericOAICompatibleModelHandler,
+    "generic-oai-proxy-handler":GenericOAIProxyHandler,
+    "generic-oai-proxy-handler-FC":GenericOAIProxyHandler,
     "dummy-model-handler": DummyModelHandler,
     "dummy-model-handler-FC": DummyModelHandler,
 }

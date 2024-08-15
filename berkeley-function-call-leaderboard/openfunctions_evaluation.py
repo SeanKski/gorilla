@@ -20,6 +20,7 @@ def get_args():
     parser.add_argument("--timeout", default=60, type=int)
     # NOTE: Number of workers to use for parallel generation
     parser.add_argument("--num-workers", default=1, type=int)
+    parser.add_argument("--DEBUGGER", default=False, action='store_true')  # flag that allows for debugging
 
     args = parser.parse_args()
     return args
@@ -84,7 +85,36 @@ def load_file(test_category):
 
 
 if __name__ == "__main__":
+
+    ##############################
+    # helpful for debugging
+    from dotenv import load_dotenv
+    load_dotenv()
+
+
     args = get_args()
+    print(args)
+    print(
+        (
+            f"OS environment args".center(150, "=") + "\n"
+            f"MODEL_API_KEY: {os.getenv('MODEL_API_KEY')[:10] + '...' + os.getenv('MODEL_API_KEY')[-5:]}\n"
+            f"MODEL_ENDPOINT_URL: {os.getenv('MODEL_ENDPOINT_URL')}\n"
+            f"ENDPOINT_MODEL_NAME: {os.getenv('ENDPOINT_MODEL_NAME')}\n"
+            '='.center(150, "=")
+        )
+    )
+
+    if args.DEBUGGER:
+        import debugpy
+        # Allow other computers to attach to debugpy at this IP address and port.
+        debugpy.listen(("localhost", 5678))
+
+        print("Waiting for debugger attach...")
+        debugpy.wait_for_client()  # Pause the program until a remote debugger is attached.
+        print("Debugger attached.")
+
+    ##############################
+
     if USE_COHERE_OPTIMIZATION and "command-r-plus" in args.model:
         args.model = args.model + "-optimized"
     handler = build_handler(args.model, args.temperature, args.top_p, args.max_tokens)
@@ -145,6 +175,7 @@ if __name__ == "__main__":
             # TODO: hacky way to get idxs in there.
             generation_params = [{'test_case': test_case, 'idx': idx} for idx, test_case in enumerate(test_cases)]
             # NOTE: I'm not being too careful about concurrency issues here. But seems to work well. Go Hogwild!
+            print('Starting parallel generation'.center(80, '='))
             with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
                 for result_to_write in tqdm(executor.map(inference_helper, generation_params), total=len(generation_params)):
                     if result_to_write is not None:
