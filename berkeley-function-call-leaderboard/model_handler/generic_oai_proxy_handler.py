@@ -151,9 +151,13 @@ class GenericOAIProxyHandler(BaseHandler):
             decoded_output = []
             for invoked_function in result:
                 name = list(invoked_function.keys())[0]
+                if isinstance(invoked_function[name], dict):
+                    # turn the invoked function into a string
+                    invoked_function[name] = json.dumps(invoked_function[name])
                 if name == "weather_get_by_coordinates_date":
                     date_field = invoked_function[name].split('"date": ')[1].replace("}", "")
                     invoked_function[name].replace(date_field, f'"{date_field}"')
+                
                 params = json.loads(invoked_function[name])
                 if language == "Python":
                     pass
